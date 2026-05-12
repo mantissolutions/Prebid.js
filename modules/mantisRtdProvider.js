@@ -21,7 +21,7 @@ const SUBMODULE_NAME = 'mantis';
 const LOG_PREFIX = 'mantisRtdProvider:';
 const BASIC_MANTIS_KEYS = ['mantis', 'mantis_context', 'iab_context'];
 
-const getMantisKeysSegmentData = (targetingData) => {
+export const getMantisKeysSegmentData = (targetingData) => {
   if (!targetingData || !targetingData.standard) {
     logWarn('Empty mantis data received for standard targeting');
     return [];
@@ -85,7 +85,7 @@ export function buildApiUrl(endpoint) {
 }
 
 // Extract relevant information from the API response and format it into an object with keys and values that can be used as targeting parameters
-const processMantisData = (mantisData = {}) => {
+export const processMantisData = (mantisData = {}) => {
   const { categories, emotion = {}, ratings = [], sentiment = '' } = mantisData;
   // Process emotions
   const mantisEmotions = Object.entries(emotion)
@@ -295,7 +295,7 @@ export function getBidRequestData(reqBidsConfigObj, onDone, moduleConfig) {
 function init(moduleConfig) {
   const params = moduleConfig.params;
 
-  if (typeof params !== 'object') {
+  if (!params || typeof params !== 'object') {
     logError(`${LOG_PREFIX} Missing Or invalid mantis config`);
     return false;
   }
