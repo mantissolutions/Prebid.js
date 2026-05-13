@@ -10,8 +10,6 @@
 import { submodule } from '../src/hook.js';
 import { fetch } from '../src/ajax.js';
 import { mergeDeep, logMessage, logError, logWarn, logInfo } from '../src/utils.js';
-import { getStorageManager } from '../src/storageManager.js';
-import { MODULE_TYPE_RTD } from '../src/activities/modules.js';
 
 /**
  * @typedef {import('../modules/rtdModule/index.js').RtdSubmodule} RtdSubmodule
@@ -23,7 +21,7 @@ const BASIC_MANTIS_KEYS = ['mantis', 'mantis_context', 'iab_context'];
 
 export const getMantisKeysSegmentData = (targetingData) => {
   if (!targetingData || !targetingData.standard) {
-    logWarn('Empty mantis data received for standard targeting');
+    logWarn(`${LOG_PREFIX} Empty mantis data received for standard targeting`);
     return [];
   }
   const segments = [];
@@ -35,23 +33,6 @@ export const getMantisKeysSegmentData = (targetingData) => {
     });
   }
   return segments;
-}
-
-export const storage = getStorageManager({ moduleType: MODULE_TYPE_RTD, moduleName: SUBMODULE_NAME });
-
-/**
- * Retrieve the Mantis UUID from window or local storage (set by the bid adapter).
- * @returns {string|undefined}
- */
-function getMantisUuid() {
-  if (window.mantis_uuid) {
-    return window.mantis_uuid;
-  }
-  if (storage.hasLocalStorage()) {
-    try {
-      return storage.getDataFromLocalStorage('mantis:uuid') || undefined;
-    } catch (e) { }
-  }
 }
 
 const cleanUrl = (url) => {
@@ -71,15 +52,14 @@ const cleanUrl = (url) => {
  * @returns {string}
  */
 export function buildApiUrl(endpoint) {
+  const url = cleanUrl(window.location.href);
+  if (!url) {
+    return '';
+  }
   const params = [
     "filter=fullRatings,input,findings,sentiment,emotion,categories",
-    `url=${cleanUrl(window.location.href)}`,
+    url,
   ];
-
-  const uuid = getMantisUuid();
-  if (uuid) {
-    params.push(`uuid=${encodeURIComponent(uuid)}`);
-  }
 
   return `${endpoint}?${params.join('&')}`;
 }
@@ -104,7 +84,7 @@ export const processMantisData = (mantisData = {}) => {
   // Ensure mantisRatings is "unknown" if there are no valid ratings
   const finalMantisRatings = mantisRatings || 'unknown';
   // Define the mantis_source value
-  const mantisSource = 'client-side';
+  const mantisSource = 'prebid-rtdmodule';
   // Combine finalMantisRatings, mantisSentiment, and finalMantisEmotions into a single string
   const mantis = [finalMantisRatings, mantisSentiment, finalMantisEmotions, mantisSource].filter(Boolean).join(',');
 
@@ -205,6 +185,13 @@ export function getBidRequestData(reqBidsConfigObj, onDone, moduleConfig) {
   }
 
   const url = buildApiUrl(endpoint);
+
+  if (!url) {
+    logError(`${LOG_PREFIX} invalid mantis api endpoint provided, skipping...`);
+    onDone();
+    return;
+  }
+
   const headers = new Headers({
     'Authorization': 'Basic ' + btoa(`${username}:${password}`),
   });
@@ -220,50 +207,65 @@ export function getBidRequestData(reqBidsConfigObj, onDone, moduleConfig) {
     }
   };
 
-  fetch(
-    url,
+  const request = new Request(url,
     {
-      method: 'POST',
-      headers
-    }).then(response => response.json())
-    .then(data => {
-      try {
-        const processedData = processMantisData(data, { filterThreshold: moduleConfig.params.filterThreshold });
-        const mantisSegments = getMantisKeysSegmentData(processedData);
-        if (!mantisSegments || !Array.isArray(mantisSegments) || !mantisSegments.length) {
-          logInfo(`${LOG_PREFIX} empty mantis data received`);
-          completeRequest();
-          return;
-        }
-        const ortb2StructuredData = {
-          site: {
-            content: {
+      method: 'GET',
+      headers,
+    }
+  );
+  if (!isDone) {
+    fetch(request).then(response => {
+      // any response status code > 299 is an unsuccessful response
+      if (response && response.status > 299) {
+        logError(`${LOG_PREFIX} mantis api response staus - ${response?.status}, ${response?.statusText}`);
+        throw new Error('Api request failed');
+      }
+      return response.json();
+    })
+      .then(data => {
+        try {
+          const processedData = processMantisData(data);
+          const mantisSegments = getMantisKeysSegmentData(processedData);
+          if (!mantisSegments || !Array.isArray(mantisSegments) || !mantisSegments.length) {
+            logInfo(`${LOG_PREFIX} empty mantis data received`);
+            completeRequest();
+            return;
+          }
+          const ortb2StructuredData = {
+            site: {
+              content: {
+                data: mantisSegments
+              }
+            },
+            user: {
+              data: mantisSegments
+            },
+            ext: {
               data: mantisSegments
             }
-          },
-          user: {
-            data: mantisSegments
-          },
-          ext: {
-            data: mantisSegments
           }
+          if (!isDone) {
+            const hasSetOrtb2Data = setOrtb2FromResponse(reqBidsConfigObj, ortb2StructuredData);
+            if (!hasSetOrtb2Data) {
+              logError(`${LOG_PREFIX} error occured while setting data into ortb2Fragments.global`);
+            }
+            completeRequest();
+          } else {
+            logWarn(`${LOG_PREFIX} could not receive mantis data within timeframe, skipping...`)
+          }
+        } catch (e) {
+          logError(`${LOG_PREFIX} failed to process data from Mantis API`, e?.message);
+          completeRequest();
         }
-        const hasSetOrtb2Data = setOrtb2FromResponse(reqBidsConfigObj, ortb2StructuredData);
-        if (!hasSetOrtb2Data) {
-          logError(`${LOG_PREFIX} error occured while setting data into ortb2Fragments.global`);
-        }
-      } catch (e) {
-        logError(`${LOG_PREFIX} failed to process data from Mantis API`, e?.message);
+      }).catch(error => {
+        logError(`${LOG_PREFIX} Mantis API request error`, error?.message);
         completeRequest();
-      }
-    }).catch(error => {
-      logError(`${LOG_PREFIX} Mantis API request failed`, error?.message);
-      completeRequest();
-    });
+      });
+  }
 
   mantisApiTimeout = setTimeout(function () {
     if (!isDone) {
-      logInfo('Mantis API timeout');
+      logError(`${LOG_PREFIX} Mantis API timeout reached, completing bid request.`);
       completeRequest();
     }
   }, timeout);
@@ -285,7 +287,6 @@ export function getBidRequestData(reqBidsConfigObj, onDone, moduleConfig) {
                       username: 'user',
                       password: 'pass',
                       timeout: 1000,
-                      filterThreshold: 0.6
                     }
                   }
                 ]
