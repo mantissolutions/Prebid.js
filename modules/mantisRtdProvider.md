@@ -209,15 +209,22 @@ The module requires the following parameters:
         pbjs.setConfig({
             realTimeData: {
                 auctionDelay: 1000,
+                    // NOTE:
+                    // - `auctionDelay` and `waitForIt` are optional configurations.
+                    // - When both are used together, `waitForIt: true` ensures that the auction
+                    //   waits up to the specified `auctionDelay` time for the data provider response.
+                    // - Keep `auctionDelay` as low as possible, since higher values can negatively
+                    //   impact page performance and increase latency.
                 dataProviders: [
                 {
                     name: 'mantis',
                     waitForIt: true,
                     params: {
-                    endpoint: 'https://publisher-mantis.example.com',
-                    username: 'example-user',
-                    password: 'example-pass',
-                    timeout: 1000
+                        endpoint: 'https://publisher-mantis.example.com',
+                        username: 'example-user',
+                        password: 'example-pass',
+                        // `timeout` is optional; defaults to 1000 ms if not provided
+                        timeout: 1000
                     }
                 }
                 ]
@@ -444,10 +451,10 @@ To debug integration:
             },
             "categories": {
                 "mantis": [
-                { "label": "news", "score": 0.92 }
+                    { "label": "news", "score": 0.92 }
                 ],
                 "iab": [
-                { "id": "IAB1", "score": 0.85 }
+                    { "id": "IAB1", "score": 0.85 }
                 ]
             }
         }
@@ -497,10 +504,10 @@ The module transforms the response into Prebid ORTB2 format.
 
 ```
     {
-    "ratings": [
-        { "customer": "Default", "rating": "GREEN" },
-        { "customer": "Facebook", "rating": "RED" }
-    ]
+        "ratings": [
+            { "customer": "Default", "rating": "GREEN" },
+            { "customer": "Facebook", "rating": "RED" }
+        ]
     }
 ```
 
