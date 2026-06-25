@@ -19,6 +19,12 @@ const SUBMODULE_NAME = 'mantis';
 const LOG_PREFIX = 'mantisRtdProvider:';
 const BASIC_MANTIS_KEYS = ['mantis', 'mantis_context', 'iab_context'];
 
+/**
+ * Build an array of oRTB2 segment objects from processed Mantis targeting data.
+ * One segment group is returned for each key in {@link BASIC_MANTIS_KEYS}.
+ * @param {{ standard: Object }} targetingData - Output of {@link processMantisData}.
+ * @returns {Array<{ name: string, segment: Array<{ id: string }> }>}
+ */
 export const getMantisKeysSegmentData = (targetingData) => {
   if (!targetingData || !targetingData.standard) {
     logWarn(`${LOG_PREFIX} Empty mantis data received for standard targeting`);
@@ -35,6 +41,12 @@ export const getMantisKeysSegmentData = (targetingData) => {
   return segments;
 };
 
+/**
+ * Strip query string and fragment from a URL, returning host + pathname only.
+ * Returns an empty string and logs a warning if the URL is invalid.
+ * @param {string} url
+ * @returns {string}
+ */
 export const cleanUrl = (url) => {
   try {
     const parsedUrl = new URL(url);
@@ -65,7 +77,15 @@ export function buildApiUrl(endpoint) {
   return `${endpoint}?${params.join('&')}`;
 }
 
-// Extract relevant information from the API response and format it into an object with keys and values that can be used as targeting parameters
+/**
+ * Process a raw Mantis API response into a structured targeting object.
+ * @param {Object}   [mantisData={}]
+ * @param {Object}   [mantisData.categories]          - Category scores keyed by taxonomy.
+ * @param {Object}   [mantisData.emotion]             - Emotion levels keyed by emotion name.
+ * @param {Array}    [mantisData.ratings]             - Brand-safety ratings per customer.
+ * @param {string}   [mantisData.sentiment]           - Overall page sentiment.
+ * @returns {{ standard: { mantis: string, mantis_context: string, iab_context: string } }}
+ */
 export const processMantisData = (mantisData = {}) => {
   const { categories, emotion = {}, ratings = [], sentiment = '' } = mantisData;
   // Process emotions
@@ -106,10 +126,7 @@ export const processMantisData = (mantisData = {}) => {
       mapTo: 'id',
     },
   ].reduce((acc, { subset, source, key, filter, mapTo }) => {
-    // Filter the source array based on the filter condition (either a value match or a numerical comparison)
-    const filtered = source.filter(
-      (entry) => (isNaN(filter) ? entry[key] === filter : entry[key] > filter),
-    );
+    const filtered = source.filter((entry) => entry[key] > filter);
     // Map the filtered entries to the desired field and join them into a comma-separated string
     acc[subset] = filtered.length > 0 ? filtered.map((entry) => entry[mapTo]).join(',') : 'unknown';
     return acc;
@@ -145,7 +162,6 @@ export function setOrtb2FromResponse(reqBidsConfigObj, ortb2StructuredData) {
     mergeDeep(ortb2, { user: ortb2StructuredData.user });
     logMessage(`${LOG_PREFIX} merged user data`, ortb2StructuredData.user);
   }
-  logMessage(`${LOG_PREFIX} global ortb2 data`, ortb2);
   return true;
 }
 
@@ -156,7 +172,8 @@ export function setOrtb2FromResponse(reqBidsConfigObj, ortb2StructuredData) {
  * @param {Object}   moduleConfig
  */
 export function getBidRequestData(reqBidsConfigObj, onDone, moduleConfig) {
-  const { endpoint, timeout = 1000 } = moduleConfig.params;
+  const { endpoint } = moduleConfig.params;
+  const timeout = Number(moduleConfig.params.timeout) || 1000;
 
   if (!endpoint) {
     logWarn(`${LOG_PREFIX} missing required param: endpoint`);
@@ -184,11 +201,15 @@ export function getBidRequestData(reqBidsConfigObj, onDone, moduleConfig) {
   };
 
   mantisApiTimeout = setTimeout(function () {
-    logError(`${LOG_PREFIX} Mantis API timeout reached, completing bid request.`);
+    logWarn(`${LOG_PREFIX} Mantis API timeout reached, completing bid request.`);
     completeRequest();
   }, timeout);
 
   const onSuccess = function (responseText) {
+    if (isDone) {
+      logWarn(`${LOG_PREFIX} response arrived after timeout, discarding.`);
+      return;
+    }
     try {
       const data = JSON.parse(responseText);
       const processedData = processMantisData(data);
@@ -208,7 +229,6 @@ export function getBidRequestData(reqBidsConfigObj, onDone, moduleConfig) {
           data: mantisSegments
         },
       };
-      logMessage(`${LOG_PREFIX} setting ortb2 structured mantis data`, ortb2StructuredData);
       const hasSetOrtb2Data = setOrtb2FromResponse(reqBidsConfigObj, ortb2StructuredData);
       if (!hasSetOrtb2Data) {
         logError(`${LOG_PREFIX} error occurred while setting data in ortb2Fragments.global`);
@@ -221,6 +241,7 @@ export function getBidRequestData(reqBidsConfigObj, onDone, moduleConfig) {
   };
 
   const onError = function (statusText, xhr) {
+    if (isDone) { return; }
     logError(`${LOG_PREFIX} Mantis API request error - ${xhr?.status}, ${statusText}`);
     completeRequest();
   };
