@@ -61,38 +61,6 @@ This enables -
 
 ---
 
-## Why No-Auth Behavior Exists
-
-The Mantis API does not require authentication for requests. This design choice exists to simplify integration.
-
-**Mantis provides -**
-
-    - Brand safety scores
-    - Content classification models
-    - Contextual intelligence
-
-These are accessible via public endpoints, so no credentials are needed.
-
-**Reduce Configuration Overhead -**
-
-    - Publishers can get started faster
-    - No credential management required
-    - Simpler deployment
-
-**Enable Open Access and Customer Isolation by API Endpoint**
-
-
-    Each publisher can only use the API with dedicated endpoint after opting for a Mantis account
-
-The API handles -
-
-
-    - Request routing
-    - Correct attribution of requests
-    - Manageable usage trackin g
-
----
-
 ## Features
 
 ### Prebid RTD integration
@@ -132,49 +100,11 @@ The API handles -
 
 ---
 
-## Non-goals
-
-This module intentionally does not -
-
-    - Provide server-side integration (Prebid Server)
-    - Store or persist long-term user data
-    - Perform content analysis itself
-        - All intelligence is provided by the Mantis API
-    - Guarantee bidder usage of signals
-        - DSPs decide how to use the data
-    - Replace brand safety vendors or full DMP/CDP systems
-    - Act as a standalone library (must be bundled into Prebid.js)
-
----
-
-## Repository Structure
-
-
-  Prebid.js/
-  │
-  ├── modules/
-  │   └── mantisRtdProvider.js                    ## Main RTD module (core logic)
-  │   └── mantisRtdProvider.md                    ## This page
-  └── test/
-  │   └── spec/
-  │       └── modules/
-  │           └── mantisRtdProvider_spec.js       ## Unit tests
-
----
-
 ## Mantis RTD Integration Guide
 
 **Overview**
 
 This guide explains how to integrate the Mantis Real-Time Data (RTD) module into a web page using Prebid.js.
-
-The module enriches the Prebid auction by -
-
-    - Calling the Mantis API
-    - Retrieving contextual intelligence (brand safety, sentiment, categories)
-    - Injecting the results into the OpenRTB (ortb2) object before bidding
-
-**Prerequisites**
 
 Before integration:
 
@@ -202,25 +132,18 @@ The module requires the following parameters -
 
     ``` https://api.example.com/mantis-publisher/article/classification ```
 
-- timeout
-
-    - Type: number (milliseconds)
-    - Default: 1000
-    - Description: Maximum time the module waits for Mantis response before auction proceeds
-
 ## Example Configuration
 
     ``` 
         pbjs.setConfig({
             realTimeData: {
-                auctionDelay: 1000, // 'auctionDelay' should always be greater than 'timeout' and 'waitForIt' should be set to 'true' for these values to work together. Also, 'auctionDelay' and 'timeout' should be as low as possible since higher values can negatively impact page performance and increase latency.
+                auctionDelay: 1000, // 'auctionDelay' should be as low as possible since higher values can negatively impact page performance and increase latency.
                 dataProviders: [
                 {
                     name: 'mantis',
                     waitForIt: true,
                     params: {
-                        endpoint: 'https://publisher-mantis.example.com',
-                        timeout: 1000 // This is the duration in which auction will be released if mantis api fails to fetch data. Can be set to a lower value like 900, 500 etc.
+                        endpoint: 'https://publisher-mantis.example.com/api/demo'
                     }
                 }
                 ]
@@ -245,54 +168,9 @@ When an auction starts (pbjs.requestBids()) -
 **Key Behaviors**
 
     - Request is executed before auction
-    - Auction waits only up to timeout
+    - Auction waits only up to auctionDelay
     - If request fails → auction continues normally
     - No blocking or hard dependency
-
-**Expected Endpoint Format**
-
-The endpoint should support -
-
-    - GET requests
-    - Query parameters -
-        cacheType
-        filter
-        url
-**Expected structure**
-
-    ``` https://<mantis-endpoint>?cacheType=...filter=...&url=<host+path> ```
-
-## Expected Response Structure
-
-    ```
-        {
-            "ratings": [
-                { "customer": "BrandA", "rating": "GREEN" },
-                { "customer": "BrandB", "rating": "RED" }
-            ],
-            "sentiment": "positive",
-            "emotion": {
-                "joy": { "level": "high" },
-                "anger": { "level": "low" }
-            },
-            "categories": {
-                "mantis": [
-                    { "label": "sports", "score": 0.9 }
-                ],
-                "iab": [
-                    { "id": "IAB17", "score": 0.85 }
-                ]
-            }
-        }
-    ```
-
-**Data Processing (What the module generates)**
-
-    ```
-        mantis = "BrandA-GREEN,sentiment-positive,joy-high,client-side"
-        mantis_context = "sports"
-        iab_context = "IAB17"
-    ```
 
 **ORTB2 Output Shape**
 
@@ -327,7 +205,7 @@ The endpoint should support -
     ```
 ## Timeout & Fallback Behavior
 
-    - If API response exceeds timeout -
+    - If API response exceeds auctionDelay -
 
         ```
             → RTD module stops waiting
@@ -350,8 +228,6 @@ To debug integration:
     - Network tab → Mantis API request
     - Console logs -
         - "mantisRtdProvider"
-    - ORTB data -
-        - pbjs.getConfig('ortb2')
 
 ---
 
@@ -556,67 +432,6 @@ The goal is to make behavior predictable, debuggable, and safe -
         - No segments are added
         - Auction proceeds normally
 
-## Response Handling
-
-**Valid Response**
-
-    - Parsed as JSON
-    - Processed into segments
-    - Injected into ORTB2
-
-**Invalid JSON Response**
-
-    Examples -
-
-    - Malformed JSON
-    - Non-JSON response
-
-    Behavior -
-
-    - Parsing fails
-    - Error is caught (try/catch)
-    - No segments are added
-    - Auction continues
-
-**Unexpected Payload Structure**
-
-    Examples -
-
-        - Missing fields (ratings, categories)
-        - Incorrect formats
-
-    Behavior -
-
-        - Partial or empty data generated
-        - Invalid fields ignored
-        - Safe defaults applied (unknown)
-        - May result in no segments
-
-**Empty Response or No Segments**
-
-    Examples -
-
-        - No ratings
-        - Categories below threshold
-        - All values filtered out
-
-    Behavior -
-
-        - No segments are created
-        - ORTB2 is not modified
-        - Auction continues
-
-## Retry Behavior
-
-**No Retries**
-
-    - The module does not retry failed requests
-    - Applies to -
-        - Network failures
-        - 4xx responses
-        - 5xx responses
-        - Timeouts
-
 ## Fallback Behavior
 
 **No Public Fallback**
@@ -625,109 +440,6 @@ The goal is to make behavior predictable, debuggable, and safe -
     - No cached results are used
     - No alternative providers are invoked
 
-## Testing & Local Development
-
-**Prerequisites**
-
-    Before getting started, ensure you have -
-
-    - Node.js (recommended: LTS version)
-    - npm (comes with Node.js)
-
-**Install Dependencies**
-
-    Run the following command from the root of the repository -
-        - git clone https://github.com/prebid/Prebid.js.git
-        - cd Prebid.js
-        - npm ci
-
-    This will -
-
-        - Install all required dependencies
-        - Set up dev tooling (linting, testing, etc.)
-
-**Running Tests**
-
-    Execute all unit tests -
-
-        - Update the scripts with ``` "test:mantis": "gulp test --file=test/spec/modules/mantisRtdProvider_spec.js" ``` in package.json
-        - npm run test:mantis
-
-**What this does**
-
-    - Runs all test suites
-    - Verifies -
-        - Data processing logic
-        - Segment generation
-        - Error handling
-    - Ensures no regressions
-
-## Local Validation Before Release
-
-    - Before submitting changes or preparing a release, validate the following -
-
-**Functional Validation**
-
-    - Update the scripts with ``` "test:mantis": "gulp test --file=test/spec/modules/mantisRtdProvider_spec.js" ``` in package.json
-    - npm run test:mantis
-
-**Manual Logic Review**
-
-    Verify -
-
-    - API request generation (URL + params)
-    - Data processing logic (ratings, sentiment, categories)
-    - ORTB2 output structure
-
-**Example Validation**
-
-    Check that README examples still match -
-
-    - API request format
-    - Response structure
-    - ORTB2 output
-
-**Documentation Updates**
-
-    - README is updated (if behavior changed)
-    - Examples reflect current logic
-    - Config instructions remain accurate
-
 **Build & Run**
 
     - Refer README.md file in root directory
-
-## Contribution Workflow
-
-  Follow this standard workflow for all changes -
-    
-    - Create a new branch -
-        - git checkout -b <type>/<ticket-id>-<short-description>
-
-        Types -
-            - feature | fix | refactor
-
-        Example -
-            - git checkout -b feature/ABC-123-add-mapping-logic
-    - Commit message format -
-        - git commit -m "<type>:<ticket-id>-<short-description>"
-
-        Example -
-            - git commit -m "feat:ABC-123-add-mapping-logic"
-    - Filename convention -
-        - Use camelCase
-
-        Example -
-            - mantisRtdProvider.js
-    - Test filename convention -
-        - <filename>_spec
-
-        Example -
-            - mantisRtdProvider_spec.js
-    - Logging -
-
-    - Use Prebid logging utilities
-      - logMessage();
-      - logWarn();
-      - logError();
-      - logInfo();

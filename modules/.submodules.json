@@ -107,6 +107,7 @@
       "intersectionRtdProvider",
       "jwplayerRtdProvider",
       "liveIntentRtdProvider",
+      "mantisRtdProvider",
       "mediafilterRtdProvider",
       "medianetRtdProvider",
       "mgidRtdProvider",
@@ -136,8 +137,7 @@
       "timeoutRtdProvider",
       "weboramaRtdProvider",
       "wurflRtdProvider",
-      "encypherRtdProvider",
-      "mantisRtdProvider"
+      "encypherRtdProvider"
     ],
     "fpdModule": [
       "validationFpdModule",
