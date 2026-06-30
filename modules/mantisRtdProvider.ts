@@ -255,10 +255,10 @@ export function getBidRequestData(
   onDone: () => void,
   moduleConfig: RTDProviderConfig<'mantis'>,
   _consent: AllConsentData,
-  _timeout: number
+  auctionDelay: number
 ): void {
   const { endpoint } = moduleConfig.params;
-  const timeout = moduleConfig.params.timeout || 1000;
+  const timeout = auctionDelay || 1000;
 
   if (!endpoint) {
     logWarn(`${LOG_PREFIX} missing required param: endpoint`);
