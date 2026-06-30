@@ -258,7 +258,7 @@ export function getBidRequestData(
   _timeout: number
 ): void {
   const { endpoint } = moduleConfig.params;
-  const timeout = moduleConfig.params.timeout ?? 1000;
+  const timeout = moduleConfig.params.timeout || 1000;
 
   if (!endpoint) {
     logWarn(`${LOG_PREFIX} missing required param: endpoint`);
