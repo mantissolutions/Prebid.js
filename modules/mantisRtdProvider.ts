@@ -9,46 +9,131 @@
 
 import { submodule } from '../src/hook.js';
 import { ajax } from '../src/ajax.js';
+import type { XHR } from '../src/ajax.ts';
 import { mergeDeep, logMessage, logError, logWarn, logInfo } from '../src/utils.js';
+import type { AllConsentData } from '../src/consentHandler.ts';
 import type { RTDProviderConfig, RtdProviderSpec } from './rtdModule/spec.ts';
-import type {
-  MantisApiResponse,
-  MantisCategory,
-  MantisModuleConfig,
-  MantisModuleParams,
-  MantisOrtb2StructuredData,
-  MantisSegmentGroup,
-  ProcessedMantisData,
-} from './mantisRtdProvider.types.ts';
+import type { StartAuctionOptions } from '../src/prebid.ts';
 
-// Re-export types so consumers can import from a single entry point if needed.
-export type {
-  MantisApiResponse,
-  MantisCategory,
-  MantisModuleConfig,
-  MantisModuleParams,
-  MantisOrtb2StructuredData,
-  MantisSegmentGroup,
-  ProcessedMantisData,
-} from './mantisRtdProvider.types.ts';
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+/** A scored category entry from the Mantis API. */
+interface MantisCategory {
+  score: number;
+  /** Human-readable label (mantis taxonomy). */
+  label?: string;
+  /** Taxonomy ID (IAB taxonomy). */
+  id?: string;
+}
+
+/** Emotion level returned by the Mantis API. */
+interface MantisEmotion {
+  level: string;
+}
+
+/** Brand-safety rating entry per customer. */
+interface MantisRating {
+  customer: string;
+  /** Rating value, or "N/A" when unavailable. */
+  rating: string;
+}
+
+/** Raw JSON response shape from the Mantis contextual API. */
+interface MantisApiResponse {
+  categories?: {
+    mantis?: MantisCategory[];
+    iab?: MantisCategory[];
+  };
+  emotion?: Record<string, MantisEmotion>;
+  ratings?: MantisRating[];
+  sentiment?: string;
+}
+
+/** Processed targeting values — each field is a comma-separated token string. */
+interface MantisStandardTargeting {
+  mantis: string;
+  mantis_context: string;
+  iab_context: string;
+}
+
+/** Return type of {@link processMantisData}. */
+interface ProcessedMantisData {
+  standard: MantisStandardTargeting;
+}
+
+/** A single oRTB2 segment object. */
+interface Ortb2Segment {
+  id: string;
+}
+
+/** Named oRTB2 segment group mapping to one Mantis targeting key. */
+interface MantisSegmentGroup {
+  name: string;
+  segment: Ortb2Segment[];
+}
+
+/** Structured data passed to {@link setOrtb2FromResponse}. */
+interface MantisOrtb2StructuredData {
+  site?: { content?: { data?: MantisSegmentGroup[] } };
+  user?: { data?: MantisSegmentGroup[] };
+}
+
+/** Intermediate subset definition used inside {@link processMantisData}. */
+interface MantisSubsetDef {
+  subset: keyof Omit<MantisStandardTargeting, 'mantis'>;
+  source: MantisCategory[];
+  key: keyof MantisCategory;
+  filter: number;
+  mapTo: keyof MantisCategory;
+}
+
+/** Accumulator type for subset processing inside {@link processMantisData}. */
+type MantisSubsetAcc = Record<keyof Omit<MantisStandardTargeting, 'mantis'>, string>;
+interface MantisModuleParams {
+  /** Base URL of the Mantis RTD API endpoint. */
+  endpoint: string;
+  /** Max ms to wait for the API before continuing the auction. Defaults to 1000. */
+  timeout?: number;
+}
+
+// ---------------------------------------------------------------------------
+// ProviderConfig augmentation
+// ---------------------------------------------------------------------------
+
+declare module './rtdModule/spec' {
+  interface ProviderConfig {
+    mantis: {
+      params: MantisModuleParams;
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
 
 const SUBMODULE_NAME = 'mantis' as const;
 const LOG_PREFIX = 'mantisRtdProvider:';
-const BASIC_MANTIS_KEYS: ReadonlyArray<keyof ProcessedMantisData['standard']> = [
+const BASIC_MANTIS_KEYS: ReadonlyArray<keyof MantisStandardTargeting> = [
   'mantis',
   'mantis_context',
   'iab_context',
 ];
 
+// ---------------------------------------------------------------------------
+// Exported functions
+// ---------------------------------------------------------------------------
+
 /**
  * Build an array of oRTB2 segment objects from processed Mantis targeting data.
  * One segment group is returned for each key in {@link BASIC_MANTIS_KEYS}.
- * @param targetingData - Output of {@link processMantisData}.
  */
 export const getMantisKeysSegmentData = (
   targetingData: ProcessedMantisData | null | undefined
 ): MantisSegmentGroup[] => {
-  if (!targetingData || !targetingData.standard) {
+  if (!targetingData?.standard) {
     logWarn(`${LOG_PREFIX} Empty mantis data received for standard targeting`);
     return [];
   }
@@ -61,7 +146,7 @@ export const getMantisKeysSegmentData = (
       .map((id: string) => ({ id }));
     segments.push({
       name: mantisKey,
-      segment: [...new Map(keySegments.map((s: { id: string }) => [s.id, s])).values()],
+      segment: [...new Map(keySegments.map((s: Ortb2Segment) => [s.id, s])).values()],
     });
   }
   return segments;
@@ -74,7 +159,6 @@ export const getMantisKeysSegmentData = (
 export const cleanUrl = (url: string): string => {
   try {
     const parsedUrl = new URL(url);
-    // parsedUrl.host gives hostname:port (if port is specified)
     return parsedUrl.host + parsedUrl.pathname;
   } catch (error: unknown) {
     logWarn(`${LOG_PREFIX} Invalid url: ${(error as Error)?.message}`);
@@ -85,18 +169,14 @@ export const cleanUrl = (url: string): string => {
 /**
  * Build the Mantis RTD API request URL.
  * @param endpoint - Base URL of the Mantis RTD API.
- * @note The page URL is cleaned by {@link cleanUrl} before being appended as a query
- * parameter. cleanUrl strips the query string, fragment, and credentials, leaving only
- * host + pathname. The remaining characters (letters, digits, hyphens, dots, and forward
- * slashes) do not require percent-encoding because they cannot be mistaken for query string
- * delimiters (&, =) and are handled correctly by the Mantis API. encodeURIComponent is
- * therefore intentionally omitted.
+ * @note cleanUrl strips the query string, fragment, and credentials, leaving only
+ * host + pathname. The remaining characters do not require percent-encoding because
+ * they cannot be mistaken for query string delimiters and are handled correctly by
+ * the Mantis API. encodeURIComponent is therefore intentionally omitted.
  */
 export function buildApiUrl(endpoint: string): string {
   const url = cleanUrl(window.location.href);
-  if (!url) {
-    return '';
-  }
+  if (!url) return '';
   const params = [
     'cacheType=public',
     'filter=fullRatings,input,findings,sentiment,emotion,categories',
@@ -111,79 +191,38 @@ export function buildApiUrl(endpoint: string): string {
 export const processMantisData = (mantisData: MantisApiResponse = {}): ProcessedMantisData => {
   const { categories, emotion = {}, ratings = [], sentiment = '' } = mantisData;
 
-  // Process emotions
   const mantisEmotions = Object.entries(emotion)
-    .map(([k, { level }]) => (k === 'unknown' ? 'emotions-unknown' : `${k}-${level}`))
+    .map(([k, v]: [string, MantisEmotion]) => (k === 'unknown' ? 'emotions-unknown' : `${k}-${v.level}`))
     .join(',');
-  // Ensure mantisEmotions includes "emotions-unknown" if there are no emotions
   const finalMantisEmotions = mantisEmotions || 'emotions-unknown';
 
-  // Process the sentiment into the format "sentiment-sentimentValue"
   const mantisSentiment = sentiment ? `sentiment-${sentiment}` : 'sentiment-unknown';
 
-  // Process the ratings into a comma-separated string, skipping invalid ratings
   const mantisRatings = ratings
     .filter(({ rating }) => rating !== 'N/A')
     .map(({ customer, rating }) => `${customer}-${rating}`)
     .join(',');
-  // Ensure mantisRatings is "unknown" if there are no valid ratings
   const finalMantisRatings = mantisRatings || 'unknown';
 
-  // Define the mantis_source value
-  const mantisSource = 'prebid-rtdmodule';
-
-  // Combine finalMantisRatings, mantisSentiment, and finalMantisEmotions into a single string
-  const mantis = [finalMantisRatings, mantisSentiment, finalMantisEmotions, mantisSource]
+  const mantis = [finalMantisRatings, mantisSentiment, finalMantisEmotions, 'prebid-rtdmodule']
     .filter(Boolean)
     .join(',');
 
-  type SubsetDef = {
-    subset: 'mantis_context' | 'iab_context';
-    source: MantisCategory[];
-    key: keyof MantisCategory;
-    filter: number;
-    mapTo: keyof MantisCategory;
-  };
-
-  type SubsetAcc = Record<'mantis_context' | 'iab_context', string>;
-
-  // Define the subsets for granular targeting
-  const subsets: SubsetAcc = (
+  const subsets = (
     [
-      {
-        subset: 'mantis_context',
-        source: (categories?.mantis) || [],
-        key: 'score',
-        filter: 0.6,
-        mapTo: 'label',
-      },
-      {
-        subset: 'iab_context',
-        source: (categories?.iab) || [],
-        key: 'score',
-        filter: 0.6,
-        mapTo: 'id',
-      },
-    ] as SubsetDef[]
-  ).reduce<SubsetAcc>(
+      { subset: 'mantis_context', source: categories?.mantis || [], key: 'score', filter: 0.6, mapTo: 'label' },
+      { subset: 'iab_context', source: categories?.iab || [], key: 'score', filter: 0.6, mapTo: 'id' },
+    ] as MantisSubsetDef[]
+  ).reduce<MantisSubsetAcc>(
     (acc, { subset, source, key, filter, mapTo }) => {
       const filtered = source.filter((entry) => (entry[key] as number) > filter);
-      acc[subset] =
-        filtered.length > 0
-          ? filtered.map((entry) => entry[mapTo] as string).join(',')
-          : 'unknown';
+      acc[subset] = filtered.length > 0 ? filtered.map((e) => e[mapTo] as string).join(',') : 'unknown';
       return acc;
     },
     { mantis_context: '', iab_context: '' }
   );
 
-  const standardData = {
-    mantis,
-    mantis_context: subsets.mantis_context,
-    iab_context: subsets.iab_context,
-  };
-
-  return { standard: standardData };
+  return { standard: { mantis, mantis_context: subsets.mantis_context, iab_context: subsets.iab_context } };
 };
 
 /**
@@ -191,25 +230,20 @@ export const processMantisData = (mantisData: MantisApiResponse = {}): Processed
  * Returns `true` when data was successfully merged, `false` otherwise.
  */
 export function setOrtb2FromResponse(
-  reqBidsConfigObj: { ortb2Fragments: { global: object } },
+  reqBidsConfigObj: StartAuctionOptions,
   ortb2StructuredData: MantisOrtb2StructuredData | null | undefined
 ): boolean {
-  const ortb2 = reqBidsConfigObj.ortb2Fragments.global;
-
-  if (!ortb2StructuredData || typeof ortb2StructuredData !== 'object') {
-    return false;
-  }
+  const ortb2 = reqBidsConfigObj.ortb2Fragments?.global;
+  if (!ortb2 || !ortb2StructuredData || typeof ortb2StructuredData !== 'object') return false;
 
   if (ortb2StructuredData.site) {
     mergeDeep(ortb2, { site: ortb2StructuredData.site });
     logMessage(`${LOG_PREFIX} merged site data`, ortb2StructuredData.site);
   }
-
   if (ortb2StructuredData.user) {
     mergeDeep(ortb2, { user: ortb2StructuredData.user });
     logMessage(`${LOG_PREFIX} merged user data`, ortb2StructuredData.user);
   }
-
   return true;
 }
 
@@ -217,13 +251,14 @@ export function setOrtb2FromResponse(
  * Fetch RTD data from the Mantis API and populate ortb2 fragments.
  */
 export function getBidRequestData(
-  reqBidsConfigObj: { ortb2Fragments: { global: object } },
+  reqBidsConfigObj: StartAuctionOptions,
   onDone: () => void,
-  moduleConfig: RTDProviderConfig<'mantis'>
+  moduleConfig: RTDProviderConfig<'mantis'>,
+  _consent: AllConsentData,
+  _timeout: number
 ): void {
-  const params = (moduleConfig as unknown as MantisModuleConfig).params;
-  const { endpoint } = params;
-  const timeout = Number(params.timeout) || 1000;
+  const { endpoint } = moduleConfig.params;
+  const timeout = moduleConfig.params.timeout ?? 1000;
 
   if (!endpoint) {
     logWarn(`${LOG_PREFIX} missing required param: endpoint`);
@@ -232,7 +267,6 @@ export function getBidRequestData(
   }
 
   const url = buildApiUrl(endpoint);
-
   if (!url) {
     logError(`${LOG_PREFIX} invalid mantis api endpoint provided, skipping...`);
     onDone();
@@ -250,37 +284,29 @@ export function getBidRequestData(
     }
   };
 
-  mantisApiTimeout = setTimeout(function () {
+  mantisApiTimeout = setTimeout(() => {
     logWarn(`${LOG_PREFIX} Mantis API timeout reached, completing bid request.`);
     completeRequest();
   }, timeout);
 
-  const onSuccess = function (responseText: string): void {
+  const onSuccess = (responseText: string): void => {
     if (isDone) {
       logWarn(`${LOG_PREFIX} response arrived after timeout, discarding.`);
       return;
     }
     try {
       const data: MantisApiResponse = JSON.parse(responseText);
-      const processedData = processMantisData(data);
-      const mantisSegments = getMantisKeysSegmentData(processedData);
-      if (!mantisSegments || !Array.isArray(mantisSegments) || !mantisSegments.length) {
+      const mantisSegments = getMantisKeysSegmentData(processMantisData(data));
+      if (!mantisSegments.length) {
         logInfo(`${LOG_PREFIX} empty mantis data received`);
         completeRequest();
         return;
       }
       const ortb2StructuredData: MantisOrtb2StructuredData = {
-        site: {
-          content: {
-            data: mantisSegments,
-          },
-        },
-        user: {
-          data: mantisSegments,
-        },
+        site: { content: { data: mantisSegments } },
+        user: { data: mantisSegments },
       };
-      const hasSetOrtb2Data = setOrtb2FromResponse(reqBidsConfigObj, ortb2StructuredData);
-      if (!hasSetOrtb2Data) {
+      if (!setOrtb2FromResponse(reqBidsConfigObj, ortb2StructuredData)) {
         logError(`${LOG_PREFIX} error occurred while setting data in ortb2Fragments.global`);
       }
       completeRequest();
@@ -290,8 +316,8 @@ export function getBidRequestData(
     }
   };
 
-  const onError = function (statusText: string, xhr: XMLHttpRequest): void {
-    if (isDone) { return; }
+  const onError = (statusText: string, xhr: XHR): void => {
+    if (isDone) return;
     logError(`${LOG_PREFIX} Mantis API request error - ${xhr?.status}, ${statusText}`);
     completeRequest();
   };
@@ -304,30 +330,23 @@ export function getBidRequestData(
  * @example
  * window.pbjs.setConfig({
  *   realTimeData: {
- *     auctionDelay: 5000, // Should be as low as possible for production
- *     dataProviders: [
- *       {
- *         name: 'mantis',
- *         waitForIt: true,
- *         params: {
- *           endpoint: 'https://mantis.example.com',
- *           timeout: 1000,
- *         }
- *       }
- *     ]
+ *     auctionDelay: 5000,
+ *     dataProviders: [{
+ *       name: 'mantis',
+ *       waitForIt: true,
+ *       params: { endpoint: 'https://mantis.example.com', timeout: 1000 }
+ *     }]
  *   }
  * });
  */
-function init(moduleConfig: RTDProviderConfig<'mantis'>): boolean {
-  const params = (moduleConfig as unknown as MantisModuleConfig).params;
+function init(moduleConfig: RTDProviderConfig<'mantis'>, _consent: AllConsentData): boolean {
+  const { params } = moduleConfig;
 
   if (!params || typeof params !== 'object') {
-    logError(`${LOG_PREFIX} Missing Or invalid mantis config`);
+    logError(`${LOG_PREFIX} Missing or invalid mantis config`);
     return false;
   }
-
-  const { endpoint } = params;
-  if (!endpoint) {
+  if (!params.endpoint) {
     logError(`${LOG_PREFIX} Missing required parameters in mantis config`);
     return false;
   }
@@ -336,9 +355,7 @@ function init(moduleConfig: RTDProviderConfig<'mantis'>): boolean {
   return true;
 }
 
-type MantisRtdProviderSpec = RtdProviderSpec<'mantis'>;
-
-export const mantisDataModule: MantisRtdProviderSpec = {
+export const mantisDataModule: RtdProviderSpec<'mantis'> = {
   name: SUBMODULE_NAME,
   init,
   getBidRequestData,
