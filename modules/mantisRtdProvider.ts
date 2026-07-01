@@ -94,8 +94,6 @@ type MantisSubsetAcc = Record<keyof Omit<MantisStandardTargeting, 'mantis'>, str
 interface MantisModuleParams {
   /** Base URL of the Mantis RTD API endpoint. */
   endpoint: string;
-  /** Max ms to wait for the API before continuing the auction. Defaults to 1000. */
-  timeout?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -334,7 +332,7 @@ export function getBidRequestData(
  *     dataProviders: [{
  *       name: 'mantis',
  *       waitForIt: true,
- *       params: { endpoint: 'https://mantis.example.com', timeout: 1000 }
+ *       params: { endpoint: 'https://mantis.example.com' }
  *     }]
  *   }
  * });
